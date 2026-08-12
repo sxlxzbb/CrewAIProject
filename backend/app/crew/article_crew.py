@@ -199,8 +199,13 @@ class EditorialFlow(Flow):
         rounds = self.state.get("rounds", 0)
         if self.state.get("needs_revision") and rounds < MAX_REVISION_ROUNDS:
             self.state["rounds"] = rounds + 1
-            # 再次生成（可在此扩展为带反馈的定向重写）
-            self.state["draft"] = self.crew.generate(self.state["topic"], self.state.get("user"))
+            # 把主编的具体修改意见作为定向反馈，传给写作任务进行修订
+            feedback = self.state.get("feedback", "")
+            logger.info(f"[editorial_flow] 第 {rounds + 1} 轮重写，主编意见: {feedback[:200]}")
+            self.state["draft"] = self.crew.generate(
+                self.state["topic"], self.state.get("user"),
+                revision_feedback=feedback,
+            )
             return self.maybe_revise()
         return self.state.get("draft", "")
 
