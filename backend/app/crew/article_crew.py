@@ -30,6 +30,7 @@ from crewai_tools import TavilySearchTool
 from app.config.settings import settings
 from app.observability.langfuse_client import trace_run
 from app.util.logger import get_logger
+from app.util.tools import get_current_time
 
 logger = get_logger("crew")
 
@@ -96,7 +97,7 @@ class TechMediaCrew:
         key = settings.editor_dashscope_api_key or settings.dashscope_api_key
         base_url = settings.editor_dashscope_base_url or settings.dashscope_base_url
         temp = settings.editor_temperature
-        logger.info(f"审校Agent LLM配置,model_name:{name},key:{key},base_url:{base_url},temp:{temp}")
+        # logger.info(f"审校Agent LLM配置,model_name:{name},key:{key},base_url:{base_url},temp:{temp}")
         self.editor_llm = LLM(
             api_key=key,
             base_url=base_url,
@@ -106,6 +107,7 @@ class TechMediaCrew:
 
     def _setup_tools(self):
         self.search_tool = TavilySearchTool(max_results=3)
+        self.current_time_tool = get_current_time
 
     def _load_config(self):
         self.agent_cfg = _load_yaml("agents.yaml")
@@ -134,6 +136,7 @@ class TechMediaCrew:
             role=a["writer"]["role"],
             goal=a["writer"]["goal"],
             backstory=a["writer"]["backstory"],
+            tools=[self.current_time_tool],
             **common,
         )
 
@@ -145,7 +148,7 @@ class TechMediaCrew:
         )
 
     @_retry()
-    def _run_crew(self, topic: str, revision_feedback: str = None) -> str:
+    def _run_crew(self, topic: str, revision_feedback: str = None) -> ArticleOutput:
         t = self.task_cfg
         research_task = Task(
             description=t["research_task"]["description"].format(topic=topic),
@@ -196,13 +199,30 @@ class TechMediaCrew:
 
         logger.info(f"[_run_crew] 开始编排 topic={topic} revision={'有' if revision_feedback else '无'}")
         result = crew.kickoff()
-        logger.info(f"[_run_crew] 编排完成，输出长度={len(str(result))}")
-        return str(result)
 
-    def generate(self, topic: str, user: Optional[str] = None, revision_feedback: str = None) -> str:
+        # 将 Crew 输出稳健解析为结构化 ArticleOutput。
+        # 不同 crewai 版本下 kickoff 可能返回 ArticleOutput 实例 / CrewOutput / dict / str。
+        article: ArticleOutput
+        if isinstance(result, ArticleOutput):
+            article = result
+        elif isinstance(result, dict):
+            article = ArticleOutput(**result)
+        elif hasattr(result, "to_dict"):  # CrewOutput 等
+            try:
+                article = ArticleOutput(**result.to_dict())
+            except Exception:
+                article = ArticleOutput(body=str(result))
+        else:
+            article = ArticleOutput(body=str(result))
+
+        logger.info(f"[_run_crew] 编排完成，标题={article.title!r} 置信度={article.confidence}")
+        return article
+
+    def generate(self, topic: str, user: Optional[str] = None, revision_feedback: str = None) -> ArticleOutput:
         """对外主入口：包裹可观测性与重试。
 
         revision_feedback 不为空时，作为主编修改意见注入写作任务（定向重写）。
+        返回结构化 ArticleOutput，便于前端展示与下游入库。
         """
         with trace_run("tech_media_crew", topic=topic, user=user):
             return self._run_crew(topic, revision_feedback=revision_feedback)
@@ -230,8 +250,12 @@ class EditorialFlow(Flow):
     def review(self):
         # 主编基于草稿给出「是否合格 + 具体修改意见」。
         # 仅作门禁的硬规则（过短/占位符）也纳入，避免出现空意见时误判通过。
-        draft: ArticleOutput = self.state.get("draft")
-        text = draft.body if draft else ""
+        draft = self.state.get("draft")
+        # 容错：draft 可能为 ArticleOutput 或历史遗留的字符串
+        if isinstance(draft, ArticleOutput):
+            text = draft.body or ""
+        else:
+            text = draft or ""
         hard_fail = len(text) < 300 or "待补充" in text
 
         t = self.crew.task_cfg
