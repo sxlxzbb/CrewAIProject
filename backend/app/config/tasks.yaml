@@ -24,7 +24,15 @@ writing_task:
     3. 语言要通俗易懂
     4. 长度 800-1200 字
     5. 包含数据和例子
-  expected_output: 完整的技术文章（标题 + 正文）
+  expected_output: >
+    严格输出以下结构的 JSON（不要包含多余解释或 Markdown 代码块）：
+    {
+      "title": "文章标题",
+      "summary": "文章摘要（100字以内，概括核心观点）",
+      "body": "文章正文（含标题以外的全部内容）",
+      "keywords": ["关键词1", "关键词2", "关键词3"],
+      "confidence": 0.0 到 1.0 之间的浮点数，表示内容可信/完整程度
+    }
 
 # 主编审校（由 Flow 的 review 阶段调用，负责门禁决策与出修改意见）
 review_task:

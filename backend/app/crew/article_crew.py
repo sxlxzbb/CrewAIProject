@@ -43,10 +43,14 @@ def _load_yaml(name: str) -> dict:
 
 
 class ArticleOutput(BaseModel):
-    """结构化产出：便于前端展示与下游消费。"""
+    """结构化产出：便于前端展示与下游入库。"""
     title: str = Field(description="文章标题")
-    body: str = Field(description="文章正文")
-    keywords: list[str] = Field(default_factory=list, description="关键词")
+    summary: str = Field(default="", description="文章摘要（100字以内）")
+    body: str = Field(default="", description="文章正文")
+    keywords: list[str] = Field(default_factory=list, description="关键词列表")
+    confidence: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="置信度（0~1，表示内容可信/完整程度）"
+    )
 
 
 def _retry(max_attempts: int = 3, backoff: float = 2.0):
@@ -166,6 +170,7 @@ class TechMediaCrew:
             description=writing_desc,
             agent=self.writer,
             expected_output=t["writing_task"]["expected_output"],
+            output_pydantic=ArticleOutput,
             context=[research_task, analysis_task],
         )
 
@@ -228,7 +233,8 @@ class EditorialFlow(Flow):
     def review(self):
         # 主编基于草稿给出「是否合格 + 具体修改意见」。
         # 仅作门禁的硬规则（过短/占位符）也纳入，避免出现空意见时误判通过。
-        text = self.state.get("draft", "")
+        draft: ArticleOutput = self.state.get("draft")
+        text = draft.body if draft else ""
         hard_fail = len(text) < 300 or "待补充" in text
 
         t = self.crew.task_cfg
@@ -250,7 +256,7 @@ class EditorialFlow(Flow):
 
 
     @listen(review)
-    def maybe_revise(self):
+    def maybe_revise(self) -> ArticleOutput:
         rounds = self.state.get("rounds", 0)
         if self.state.get("needs_revision") and rounds < MAX_REVISION_ROUNDS:
             self.state["rounds"] = rounds + 1
@@ -266,11 +272,11 @@ class EditorialFlow(Flow):
         else:
             logger.info(f"迭代次数达到最大值:{MAX_REVISION_ROUNDS}")
 
-        return self.state.get("draft", "")
+        return self.state.get("draft") or ArticleOutput()
 
 
-def run_flow(topic: str, user: Optional[str] = None) -> str:
-    """便捷函数：运行带审校回环的编辑流程。"""
+def run_flow(topic: str, user: Optional[str] = None) -> ArticleOutput:
+    """便捷函数：运行带审校回环的编辑流程，返回结构化 ArticleOutput。"""
     crew = TechMediaCrew()
     with trace_run("editorial_flow", topic=topic, user=user):
         flow = EditorialFlow(crew)
