@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     editor_dashscope_base_url: str = ""
     editor_temperature: float = 0.7
 
+    # CrewAI Flow最大重写次数：「写 → 审 → 改」回环 ----
+    max_revision_rounds: int = 3
+
     # 搜索工具
     tavily_api_key: str = ""
 

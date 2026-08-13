@@ -208,9 +208,6 @@ class TechMediaCrew:
             return self._run_crew(topic, revision_feedback=revision_feedback)
 
 
-# ---- CrewAI Flow：实现「写 → 审 → 改」回环 ----
-MAX_REVISION_ROUNDS = 2
-
 
 class EditorialFlow(Flow):
     """带审校回环的编辑流程。"""
@@ -258,7 +255,7 @@ class EditorialFlow(Flow):
     @listen(review)
     def maybe_revise(self) -> ArticleOutput:
         rounds = self.state.get("rounds", 0)
-        if self.state.get("needs_revision") and rounds < MAX_REVISION_ROUNDS:
+        if self.state.get("needs_revision") and rounds < settings.max_revision_rounds:
             self.state["rounds"] = rounds + 1
             # 把主编的具体修改意见作为定向反馈，传给写作任务进行修订
             feedback = self.state.get("feedback", "")
@@ -270,7 +267,7 @@ class EditorialFlow(Flow):
             )
             return self.maybe_revise()
         else:
-            logger.info(f"迭代次数达到最大值:{MAX_REVISION_ROUNDS}")
+            logger.info(f"迭代次数达到最大值:{settings.max_revision_rounds}")
 
         return self.state.get("draft") or ArticleOutput()
 
