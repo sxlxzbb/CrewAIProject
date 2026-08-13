@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     temperature: float = 0.7
     max_iter: int = 3  # 放开迭代，允许 Agent 自我纠正（带守卫）
 
+    # 审校智能体(主编)专用模型：未配置时回退使用上面的主模型配置
+    editor_model_name: str = ""
+    editor_dashscope_api_key: str = ""
+    editor_dashscope_base_url: str = ""
+    editor_temperature: float = 0.7
+
     # 搜索工具
     tavily_api_key: str = ""
 

@@ -1,6 +1,4 @@
 """聊天/生成路由：接收主题，返回编辑部最终成文。"""
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -8,8 +6,9 @@ from sqlalchemy.orm import Session
 from app.api.auth import decode_token
 from app.db.database import get_db
 from app.crew.article_crew import run_flow
+from app.util.logger import get_logger
 
-logger = logging.getLogger("chat")
+logger = get_logger("chat")
 router = APIRouter(prefix="/api", tags=["chat"])
 
 

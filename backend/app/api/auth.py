@@ -1,5 +1,4 @@
 """认证路由：登录签发 JWT。"""
-import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -10,8 +9,9 @@ from sqlalchemy.orm import Session
 from app.config.settings import settings
 from app.db.database import get_db
 from app.db.models import User
+from app.util.logger import get_logger
 
-logger = logging.getLogger("auth")
+logger = get_logger("auth")
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 

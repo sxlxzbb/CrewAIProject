@@ -9,11 +9,12 @@
 - 本模块只做「开始/完成/异常 + 耗时」的本地日志，对主流程零侵入、零副作用。
 """
 import time
-import logging
 from contextlib import contextmanager
 from typing import Optional
 
-logger = logging.getLogger("observability")
+from app.util.logger import get_logger
+
+logger = get_logger("observability")
 
 
 @contextmanager
