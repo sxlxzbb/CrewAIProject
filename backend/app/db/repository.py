@@ -3,6 +3,7 @@
 每个函数内部独立创建并关闭数据库会话，保证在 CrewAI Flow 的线程环境中调用也是线程安全的。
 不使用数据库外键约束，关联通过 run_id 字段逻辑维护（见 models.py 注释）。
 """
+import json
 from datetime import datetime
 
 from sqlalchemy import select
@@ -145,7 +146,11 @@ def update_article_review(
     review_status: int | None = None,
     publish_result: str | None = None,
 ) -> Article | None:
-    """更新文章的人工审核状态/发布结果。仅更新传入的字段。按 run_id 列匹配（非主键）。"""
+    """更新文章的人工审核状态/发布结果。仅更新传入的字段。按 run_id 列匹配（非主键）。
+
+    publish_result 可直接传入发布工具返回的对象（dict 等），会统一序列化为 JSON 字符串；
+    字段 varchar(200)，超长截断。
+    """
     db = SessionLocal()
     try:
         art = db.execute(
@@ -156,7 +161,12 @@ def update_article_review(
         if review_status is not None:
             art.review_status = review_status
         if publish_result is not None:
-            # 字段长度限制 200，超长截断
+            # 统一序列化为 JSON 字符串后截断（varchar(200)）
+            if not isinstance(publish_result, str):
+                try:
+                    publish_result = json.dumps(publish_result, ensure_ascii=False)
+                except TypeError:
+                    publish_result = str(publish_result)
             art.publish_result = publish_result[:200] if publish_result else publish_result
         db.commit()
         db.refresh(art)

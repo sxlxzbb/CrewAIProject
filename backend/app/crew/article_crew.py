@@ -9,6 +9,7 @@
 - 可观测性：CrewAI 原生 tracing 上报至 CrewAI AMP（依赖 CREWAI_API_KEY），
   本地运行日志由 langfuse_client.trace_run 包裹记录。
 """
+import json
 import time
 from pathlib import Path
 from typing import Optional
@@ -72,6 +73,56 @@ def _retry(max_attempts: int = 3, backoff: float = 2.0):
             raise last
         return wrapper
     return decorator
+
+
+def _extract_article_from_raw(raw: str) -> "ArticleOutput | None":
+    """从 Crew 的完整原始输出中提取 ArticleOutput。
+
+    raw 通常是模型输出的 JSON（可能被 ```json 代码块包裹）。这里做最稳健的提取，
+    优先保证 body（长正文）完整：先尝试整段 json.loads，再从文本中截取第一个
+    完整的 { ... } 块解析；若仍失败返回 None，由调用方兜底。
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+    # 去掉可能的 ```json ... ``` 包裹
+    if text.startswith("```"):
+        # 找到第一个换行后的内容到最后一个 ``` 前
+        first_newline = text.find("\n")
+        last_fence = text.rfind("```")
+        if first_newline != -1 and last_fence > first_newline:
+            text = text[first_newline + 1:last_fence].strip()
+
+    candidates = [text]
+    # 尝试截取文本中第一个 { 到最后一个 } 之间的完整 JSON
+    try:
+        start = text.index("{")
+        end = text.rindex("}")
+        candidates.append(text[start:end + 1])
+    except ValueError:
+        pass
+
+    for cand in candidates:
+        try:
+            data = json.loads(cand)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        # 必须至少有 body 或 title，否则认为不是文章结构
+        if not (data.get("body") or data.get("title")):
+            continue
+        keywords = data.get("keywords") or []
+        if isinstance(keywords, str):
+            keywords = [keywords]
+        return ArticleOutput(
+            title=data.get("title") or "",
+            summary=data.get("summary") or "",
+            body=data.get("body") or "",
+            keywords=keywords,
+            confidence=float(data.get("confidence") or 0.0),
+        )
+    return None
 
 
 class TechMediaCrew:
@@ -234,32 +285,43 @@ class TechMediaCrew:
         result = crew.kickoff()
 
         # 将 Crew 输出稳健解析为结构化 ArticleOutput。
-        # 不同 crewai 版本下 kickoff 可能返回 ArticleOutput 实例 / CrewOutput / dict / str。
+        # 注意：writing_task 输出的是含长正文（body）的大 JSON。CrewAI 的 output_pydantic
+        # 在解析超长字符串字段时可能截断/丢失内容，因此【优先使用 result.raw 完整原文】
+        # 自己提取 body，确保主编审校时拿到的是完整正文。
         article: ArticleOutput
         if isinstance(result, ArticleOutput):
             article = result
-        elif hasattr(result, "pydantic") and result.pydantic is not None:
-            # CrewOutput：当 task 配置了 output_pydantic 时，结构化结果在此
-            try:
-                article = result.pydantic if isinstance(result.pydantic, ArticleOutput) else ArticleOutput(**result.pydantic)
-            except Exception:
-                article = ArticleOutput(body=str(result))
-        elif isinstance(result, dict):
-            article = ArticleOutput(**result)
-        elif hasattr(result, "to_dict"):  # CrewOutput 等
-            d = result.to_dict()
-            # CrewOutput.to_dict 可能是嵌套结构（含 tasks_output），尝试提取扁平字段
-            flat = d.get("tasks_output")
-            if isinstance(flat, list) and flat:
-                last = flat[-1]
-                if isinstance(last, dict):
-                    d = last.get("pydantic") or last.get("output") or last
-            try:
-                article = ArticleOutput(**d) if isinstance(d, dict) else ArticleOutput(body=str(d))
-            except Exception:
-                article = ArticleOutput(body=str(result))
         else:
-            article = ArticleOutput(body=str(result))
+            # 1) 优先从完整原始输出 raw 提取（最保真，不会被 pydantic 截断）
+            raw_text = getattr(result, "raw", None) if not isinstance(result, (dict, str)) else None
+            if raw_text:
+                parsed = _extract_article_from_raw(raw_text)
+                if parsed is not None:
+                    article = parsed
+                else:
+                    # raw 无法解析为结构，直接把 raw 当作正文兜底
+                    article = ArticleOutput(body=raw_text)
+            elif isinstance(result, dict):
+                article = ArticleOutput(**result)
+            elif hasattr(result, "pydantic") and result.pydantic is not None:
+                # CrewOutput：当 task 配置了 output_pydantic 时，结构化结果在此
+                try:
+                    article = result.pydantic if isinstance(result.pydantic, ArticleOutput) else ArticleOutput(**result.pydantic)
+                except Exception:
+                    article = ArticleOutput(body=str(result))
+            elif hasattr(result, "to_dict"):  # CrewOutput 等
+                d = result.to_dict()
+                flat = d.get("tasks_output")
+                if isinstance(flat, list) and flat:
+                    last = flat[-1]
+                    if isinstance(last, dict):
+                        d = last.get("pydantic") or last.get("output") or last
+                try:
+                    article = ArticleOutput(**d) if isinstance(d, dict) else ArticleOutput(body=str(d))
+                except Exception:
+                    article = ArticleOutput(body=str(result))
+            else:
+                article = ArticleOutput(body=str(result))
 
         logger.info(f"[_run_crew] 编排完成，标题={article.title!r} 置信度={article.confidence}")
         return article

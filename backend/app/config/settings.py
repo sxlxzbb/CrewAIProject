@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
+        # settings.py 位于 backend/app/config/；项目根 .env 在往上 3 层处（config->app->backend->CrewAIDemo）
         env_file=os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env"),
         env_file_encoding="utf-8",
         extra="ignore",

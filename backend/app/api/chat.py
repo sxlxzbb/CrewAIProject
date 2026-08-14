@@ -28,12 +28,8 @@ def _get_current_user(auth: str = Depends(decode_token)):
 
 
 def _publish_article(run_id: int, article: ArticleOutput) -> str:
-    """调用 MCP 发布文章，返回发布工具结果 JSON 字符串；失败则抛出异常。"""
-    result = mcp_client.publish_article(article)
-    try:
-        return json.dumps(result, ensure_ascii=False)
-    except TypeError:
-        return str(result)
+    """调用 MCP 发布文章，直接返回发布工具的结果（形如 {"code":0,"message":"success"}），不做额外包装；失败则抛出异常。"""
+    return mcp_client.publish_article(article)
 
 
 def _persist_success(run_id: int, topic: str, username: str, result, start: datetime):
@@ -74,8 +70,6 @@ def review(run_id: int, req: ReviewRequest, username: str = Depends(_get_current
     run = repo.get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="运行记录不存在")
-    if run.status != "SUCCESS":
-        raise HTTPException(status_code=400, detail="任务尚未生成完成，无法审核")
 
     article = repo.get_article_by_run_id(run_id)
     if article is None:
