@@ -503,5 +503,5 @@ def run_flow(
         flow.state["user"] = user
         flow.state["rounds"] = 0  # 从 0 开始计数，使审校回环真正生效
         flow.state["run_id"] = run_id
-        # flow.state["prefill_draft"] = prefill_draft # 先不用已有草稿
+        flow.state["prefill_draft"] = prefill_draft # 先不用已有草稿
         return flow.kickoff()

@@ -82,6 +82,7 @@ def review(run_id: int, req: ReviewRequest, username: str = Depends(_get_current
         if article.review_status in (1, -1) and article.publish_result:
             return {"run_id": run_id, "action": action, "published": True,
                     "publish_result": article.publish_result, "msg": "此前已发布，无需重复"}
+
         try:
             publish_result = _publish_article(run_id, ArticleOutput(
                 title=article.title, summary=article.summary, body=article.body,
@@ -90,6 +91,7 @@ def review(run_id: int, req: ReviewRequest, username: str = Depends(_get_current
         except Exception as e:
             logger.exception("[chat] 审核通过-发布失败")
             raise HTTPException(status_code=500, detail=f"发布失败: {e}")
+
         repo.update_article_review(run_id, review_status=target_status, publish_result=publish_result)
         return {"run_id": run_id, "action": action, "published": True, "publish_result": publish_result}
 
@@ -99,12 +101,12 @@ def review(run_id: int, req: ReviewRequest, username: str = Depends(_get_current
         return {"run_id": run_id, "action": action, "published": False, "msg": "已放弃，未发布"}
 
     elif action == "regenerate":
-        # 重新生成：复用断点续跑逻辑（从写作继续），不更新审核字段（生成后仍需审核）
-        prefill = repo.get_latest_draft(run_id)
+        # 重新生成
+        # prefill = repo.get_latest_draft(run_id)
         repo.update_run(run_id, status="RUNNING", error=None, finished_at=None, duration_ms=None)
         start = datetime.now()
         try:
-            result: ArticleOutput = run_flow(topic=run.topic, user=username, run_id=run_id, prefill_draft=prefill)
+            result: ArticleOutput = run_flow(topic=run.topic, user=username, run_id=run_id)
         except Exception as e:
             repo.update_run(run_id, status="FAILED", error=str(e)[:2000],
                             finished_at=datetime.now(),
