@@ -238,11 +238,24 @@ class TechMediaCrew:
         article: ArticleOutput
         if isinstance(result, ArticleOutput):
             article = result
+        elif hasattr(result, "pydantic") and result.pydantic is not None:
+            # CrewOutput：当 task 配置了 output_pydantic 时，结构化结果在此
+            try:
+                article = result.pydantic if isinstance(result.pydantic, ArticleOutput) else ArticleOutput(**result.pydantic)
+            except Exception:
+                article = ArticleOutput(body=str(result))
         elif isinstance(result, dict):
             article = ArticleOutput(**result)
         elif hasattr(result, "to_dict"):  # CrewOutput 等
+            d = result.to_dict()
+            # CrewOutput.to_dict 可能是嵌套结构（含 tasks_output），尝试提取扁平字段
+            flat = d.get("tasks_output")
+            if isinstance(flat, list) and flat:
+                last = flat[-1]
+                if isinstance(last, dict):
+                    d = last.get("pydantic") or last.get("output") or last
             try:
-                article = ArticleOutput(**result.to_dict())
+                article = ArticleOutput(**d) if isinstance(d, dict) else ArticleOutput(body=str(d))
             except Exception:
                 article = ArticleOutput(body=str(result))
         else:

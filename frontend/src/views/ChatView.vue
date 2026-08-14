@@ -26,7 +26,49 @@
             <span class="a-label">关键词</span>
             <span v-for="(k, ki) in m.article.keywords" :key="ki" class="tag">{{ k }}</span>
           </div>
-          <div class="a-body">{{ m.article.body }}</div>
+          <!-- 正文：完整展示；若 body 为空则回退展示 summary 并提示 -->
+          <div class="a-body">
+            <span class="a-label">正文</span>
+            <template v-if="m.article.body">{{ m.article.body }}</template>
+            <template v-else-if="m.article.summary">{{ m.article.summary }}<em class="a-tip">（正文为空，已用摘要代替）</em></template>
+            <em v-else class="a-tip">（正文为空）</em>
+          </div>
+
+          <!-- 重新生成的文章：用分割线与原文分隔，不覆盖原文 -->
+          <div v-if="m.regen_article" class="a-regen">
+            <hr class="a-divider" />
+            <div class="a-regen-head">重新生成结果</div>
+            <h3 class="a-title">{{ m.regen_article.title }}</h3>
+            <div v-if="m.regen_article.summary" class="a-summary">
+              <span class="a-label">摘要</span>{{ m.regen_article.summary }}
+            </div>
+            <div v-if="m.regen_article.keywords && m.regen_article.keywords.length" class="a-keywords">
+              <span class="a-label">关键词</span>
+              <span v-for="(k, ki) in m.regen_article.keywords" :key="ki" class="tag">{{ k }}</span>
+            </div>
+            <div class="a-body">
+              <span class="a-label">正文</span>
+              <template v-if="m.regen_article.body">{{ m.regen_article.body }}</template>
+              <template v-else-if="m.regen_article.summary">{{ m.regen_article.summary }}</template>
+              <em v-else class="a-tip">（正文为空）</em>
+            </div>
+          </div>
+
+          <!-- 人工审核区：放在卡片最底部；需人工审核且状态为待审核时显示 -->
+          <div v-if="m.require_review && m.review_status === 0" class="a-review">
+            <span class="a-label">待审核</span>
+            <button class="rv approve" :disabled="m.reviewing" @click="onReview(m, 'approve')">通过并发布</button>
+            <button class="rv reject" :disabled="m.reviewing" @click="onReview(m, 'reject')">放弃</button>
+            <button class="rv regen" :disabled="m.reviewing" @click="onReview(m, 'regenerate')">重新生成</button>
+          </div>
+
+          <!-- 审核结果提示 -->
+          <div v-if="m.review_status === 1" class="a-review-done ok">
+            已通过{{ m.published ? '并发布' : '' }}
+          </div>
+          <div v-else-if="m.review_status === 2" class="a-review-done no">
+            已放弃（未发布）
+          </div>
         </div>
 
         <!-- 纯文本（用户消息 / 错误提示） -->
@@ -77,12 +119,44 @@ async function onSend() {
   try {
     const { data } = await axios.post("/api/generate", { topic: t });
     // 后端返回结构化文章对象，直接存入 article 字段供卡片渲染
-    messages.value.push({ role: "bot", article: data.result });
+    messages.value.push({
+      role: "bot",
+      article: data.result,
+      run_id: data.run_id,
+      require_review: data.require_review,
+      review_status: data.review_status,
+      published: false,
+      reviewing: false,
+    });
   } catch (e) {
     const msg = e.response?.data?.detail || "生成失败";
     messages.value.push({ role: "bot", content: `错误：${msg}` });
   } finally {
     loading.value = false;
+  }
+}
+
+async function onReview(m, action) {
+  if (!m.run_id) return;
+  m.reviewing = true;
+  try {
+    const { data } = await axios.post(`/api/review/${m.run_id}`, { action });
+    m.review_status = action === "reject" ? 2 : 1;
+    m.published = !!data.published;
+    if (action === "regenerate") {
+      // 重新生成：不覆盖原文，把新文章放在分割线下方展示；重新生成后仍需审核
+      m.regen_article = data.result;
+      m.review_status = data.review_status;
+      m.require_review = data.require_review;
+      m.published = false;
+      m.reviewing = false;
+      return;
+    }
+  } catch (e) {
+    const msg = e.response?.data?.detail || "操作失败";
+    alert(`审核操作失败：${msg}`);
+  } finally {
+    m.reviewing = false;
   }
 }
 
@@ -141,6 +215,23 @@ header {
   font-size: 12px; padding: 2px 8px; border-radius: 6px; margin: 0 6px 4px 0;
 }
 .a-body { white-space: pre-wrap; font-size: 14px; color: #333; }
+.a-body .a-label { vertical-align: top; margin-right: 8px; }
+.a-tip { color: #e0902a; font-style: normal; font-size: 12px; margin-left: 4px; }
+.a-regen { margin-top: 16px; }
+.a-divider { border: none; border-top: 1px dashed #d9d9d9; margin: 4px 0 14px; }
+.a-regen-head { font-size: 13px; font-weight: 600; color: #f0a020; margin-bottom: 10px; }
+.a-review { margin-top: 12px; padding-top: 12px; border-top: 1px dashed #eee; }
+.a-review .rv {
+  margin-left: 8px; padding: 6px 14px; border: none; border-radius: 6px;
+  cursor: pointer; font-size: 13px; color: #fff;
+}
+.a-review .rv:disabled { opacity: 0.6; cursor: default; }
+.a-review .approve { background: #21a366; }
+.a-review .reject { background: #e15b5b; }
+.a-review .regen { background: #f0a020; }
+.a-review-done { margin-top: 12px; padding: 8px 12px; border-radius: 8px; font-size: 13px; }
+.a-review-done.ok { background: #eafaf1; color: #21a366; }
+.a-review-done.no { background: #fdeeee; color: #e15b5b; }
 footer { display: flex; padding: 12px; background: #fff; border-top: 1px solid #eee; }
 footer input { flex: 1; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; }
 footer button {

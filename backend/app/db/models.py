@@ -94,4 +94,11 @@ class Article(Base):
     author: Mapped[str] = mapped_column(String(64), index=True, nullable=False, comment="作者/发起用户")
     topic: Mapped[str] = mapped_column(String(255), index=True, nullable=False, comment="生成主题")
 
+    # 人工审核状态：0=待审核(默认) 1=通过 2=放弃
+    review_status: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
+                                               index=True, comment="人工审核状态 0待审核/1通过/2放弃")
+    # 发布结果：通过审核自动发布后，写入 MCP 工具返回的 result(JSON 字符串)；未发布则空
+    publish_result: Mapped[str] = mapped_column(String(200), nullable=True,
+                                                comment="MCP 发布工具返回结果(JSON)，未发布为空")
+
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now(), comment="成文时间")

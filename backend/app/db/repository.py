@@ -108,7 +108,7 @@ def get_run(run_id: int) -> GenerationRun | None:
 
 
 def save_article(run_id: int, article: ArticleOutput, author: str, topic: str) -> int:
-    """落库最终结构化文章，并与 run 关联（run_id 唯一）。"""
+    """落库最终结构化文章，并与 run 关联（run_id 唯一）。review_status 默认 0(待审核)。"""
     db = SessionLocal()
     try:
         rec = Article(
@@ -120,10 +120,46 @@ def save_article(run_id: int, article: ArticleOutput, author: str, topic: str) -
             confidence=article.confidence or 0.0,
             author=author,
             topic=topic,
+            review_status=0,
         )
         db.add(rec)
         db.commit()
         db.refresh(rec)
         return rec.id
+    finally:
+        db.close()
+
+
+def get_article_by_run_id(run_id: int) -> Article | None:
+    """按业务 run_id（关联 generation_runs.id）查询文章记录。注意：非主键 Article.id。"""
+    db = SessionLocal()
+    try:
+        stmt = select(Article).where(Article.run_id == run_id)
+        return db.execute(stmt).scalar_one_or_none()
+    finally:
+        db.close()
+
+
+def update_article_review(
+    run_id: int,
+    review_status: int | None = None,
+    publish_result: str | None = None,
+) -> Article | None:
+    """更新文章的人工审核状态/发布结果。仅更新传入的字段。按 run_id 列匹配（非主键）。"""
+    db = SessionLocal()
+    try:
+        art = db.execute(
+            select(Article).where(Article.run_id == run_id)
+        ).scalar_one_or_none()
+        if art is None:
+            return None
+        if review_status is not None:
+            art.review_status = review_status
+        if publish_result is not None:
+            # 字段长度限制 200，超长截断
+            art.publish_result = publish_result[:200] if publish_result else publish_result
+        db.commit()
+        db.refresh(art)
+        return art
     finally:
         db.close()

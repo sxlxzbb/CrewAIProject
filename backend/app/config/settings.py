@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     mcp_base_url: str = ""
     mcp_auth_token: str = ""
 
+    # 人工审核开关：生成完成后是否需人工审核再发布（默认开启）
+    # True  -> 生成后不自动发布，需经人工审核（通过/放弃/重新生成）
+    # False -> 生成完成后直接通过 MCP 自动发布
+    require_human_review: bool = True
+
     @property
     def database_url(self) -> str:
         return (
