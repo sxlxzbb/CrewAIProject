@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     default_username: str = ""
     default_password: str = ""
 
+    # MCP 服务（Java Spring AI MCP，StreamableHTTP）
+    mcp_base_url: str = ""
+    mcp_auth_token: str = ""
+
     @property
     def database_url(self) -> str:
         return (
