@@ -18,7 +18,6 @@ logger = get_logger("mcp")
 
 # 工具名（由 Java 服务端声明，tools/list 可校验）
 PUBLISH_TOOL = "publishWithObject"
-PROTOCOL_VERSION = "2025-11-25"
 
 
 class McpError(RuntimeError):

@@ -32,7 +32,7 @@ def _publish_article(run_id: int, article: ArticleOutput) -> str:
     return mcp_client.publish_article(article)
 
 
-def _persist_success(run_id: int, topic: str, username: str, result, start: datetime):
+def _persist_success(run_id: int, topic: str, username: str, result: ArticleOutput, start: datetime):
     """流程成功后落库文章并更新 run 状态。
 
     若开启人工审核（默认）：仅落库，review_status=0 待审核，不自动发布；
@@ -104,14 +104,16 @@ def review(run_id: int, req: ReviewRequest, username: str = Depends(_get_current
         repo.update_run(run_id, status="RUNNING", error=None, finished_at=None, duration_ms=None)
         start = datetime.now()
         try:
-            result = run_flow(topic=run.topic, user=username, run_id=run_id, prefill_draft=prefill)
+            result: ArticleOutput = run_flow(topic=run.topic, user=username, run_id=run_id, prefill_draft=prefill)
         except Exception as e:
             repo.update_run(run_id, status="FAILED", error=str(e)[:2000],
                             finished_at=datetime.now(),
                             duration_ms=int((datetime.now() - start).total_seconds() * 1000))
             logger.exception("[chat] 重新生成失败")
             raise HTTPException(status_code=500, detail=f"重新生成失败: {e}")
+
         _persist_success(run_id, run.topic, username, result, start)
+
         return {"run_id": run_id, "action": action, "published": False,
                 "msg": "已重新生成，待人工审核", "result": result,
                 "require_review": settings.require_human_review,
