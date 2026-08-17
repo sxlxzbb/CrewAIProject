@@ -10,6 +10,7 @@ from app.api import auth, chat
 from app.db.init_db import init_db
 from app.observability.otel_setup import setup as setup_otel
 from app.util.logger import get_logger, setup_logging
+from app.worker.pool import get_executor, shutdown_executor
 
 # 避免 Windows cmd 下 crewai tracing 输出 emoji 时报 gbk 编码错误
 try:
@@ -29,7 +30,12 @@ async def lifespan(app: FastAPI):
     # 数据库初始化
     init_db()
     logger.info("数据库初始化完成。")
+    # 预热线程池：避免首个请求在 submit 时阻塞等待子进程 spawn/import
+    get_executor()
+    logger.info("后台进程池已预热。")
     yield
+    # 应用关闭时回收后台进程池
+    shutdown_executor()
 
 
 app = FastAPI(title="技术媒体编辑部 Agent", version="0.1.0", lifespan=lifespan)

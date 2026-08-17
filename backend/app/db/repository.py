@@ -33,6 +33,7 @@ def update_run(
     error: str = None,
     finished_at: datetime = None,
     duration_ms: int = None,
+    current_step: str = None,
 ) -> None:
     """更新运行记录的状态/轮次/错误/结束信息。"""
     db = SessionLocal()
@@ -51,6 +52,21 @@ def update_run(
             run.finished_at = finished_at
         if duration_ms is not None:
             run.duration_ms = duration_ms
+        if current_step is not None:
+            run.current_step = current_step
+        db.commit()
+    finally:
+        db.close()
+
+
+def update_run_current_step(run_id: int, step: str) -> None:
+    """仅更新当前执行步骤（高频调用，轻量）。"""
+    db = SessionLocal()
+    try:
+        run = db.get(GenerationRun, run_id)
+        if run is None:
+            return
+        run.current_step = step
         db.commit()
     finally:
         db.close()
@@ -109,21 +125,38 @@ def get_run(run_id: int) -> GenerationRun | None:
 
 
 def save_article(run_id: int, article: ArticleOutput, author: str, topic: str) -> int:
-    """落库最终结构化文章，并与 run 关联（run_id 唯一）。review_status 默认 0(待审核)。"""
+    """落库最终结构化文章，并与 run 关联（run_id 唯一）。
+
+    run_id 在 articles 表有唯一索引：首轮为插入；重新生成/续跑复用同一 run_id 时
+    自动转为更新（覆盖旧正文），避免主键冲突。
+    review_status：仅新插入时重置为 0(待审核)；更新时保留已有审核/发布状态。
+    """
     db = SessionLocal()
     try:
-        rec = Article(
-            run_id=run_id,
-            title=article.title or "无标题",
-            summary=article.summary or "",
-            body=article.body or "",
-            keywords=article.keywords or [],
-            confidence=article.confidence or 0.0,
-            author=author,
-            topic=topic,
-            review_status=0,
-        )
-        db.add(rec)
+        rec = db.execute(
+            select(Article).where(Article.run_id == run_id)
+        ).scalar_one_or_none()
+        if rec is None:
+            rec = Article(
+                run_id=run_id,
+                title=article.title or "无标题",
+                summary=article.summary or "",
+                body=article.body or "",
+                keywords=article.keywords or [],
+                confidence=article.confidence or 0.0,
+                author=author,
+                topic=topic,
+                review_status=0,
+            )
+            db.add(rec)
+        else:
+            rec.title = article.title or "无标题"
+            rec.summary = article.summary or ""
+            rec.body = article.body or ""
+            rec.keywords = article.keywords or []
+            rec.confidence = article.confidence or 0.0
+            rec.author = author
+            rec.topic = topic
         db.commit()
         db.refresh(rec)
         return rec.id

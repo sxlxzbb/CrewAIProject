@@ -33,9 +33,12 @@ class GenerationRun(Base):
     topic: Mapped[str] = mapped_column(String(255), index=True, nullable=False, comment="生成主题")
     author: Mapped[str] = mapped_column(String(64), index=True, nullable=False, comment="发起用户名")
 
-    # 状态枚举: PENDING / RUNNING / SUCCESS / FAILED
+    # 状态枚举: PENDING / RUNNING / SUCCESS / FAILED / CANCELLED
     status: Mapped[str] = mapped_column(String(16), index=True, nullable=False, default="PENDING",
-                                         comment="任务状态 PENDING/RUNNING/SUCCESS/FAILED")
+                                         comment="任务状态 PENDING/RUNNING/SUCCESS/FAILED/CANCELLED")
+    # 当前执行步骤：大步骤(draft/review/maybe_revise) + 小步骤(researching/analyzing/writing/editing) + 轮次(#N)
+    current_step: Mapped[str] = mapped_column(String(32), nullable=True, index=True,
+                                              comment="当前执行步骤 draft/review/maybe_revise + researching/writing... + #轮次")
     rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="实际重写轮次")
     error: Mapped[str] = mapped_column(Text, nullable=True, comment="失败原因（FAILED 时填写）")
 

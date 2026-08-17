@@ -1,5 +1,4 @@
-"""聊天/生成路由：接收主题，返回编辑部最终成文，并落库运行记录与文章。"""
-import json
+"""聊天/生成路由：接收主题，异步提交生成任务，并落库运行记录与文章。"""
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,10 +9,11 @@ from app.api.auth import decode_token
 from app.config.settings import settings
 from app.db.database import get_db
 from app.db import repository as repo
-from app.crew.article_crew import run_flow
 from app.crew.article_crew import ArticleOutput
 from app.util import mcp_client
 from app.util.logger import get_logger
+from app.worker.pool import get_executor
+from app.worker import tasks as worker_tasks
 
 logger = get_logger("chat")
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -32,36 +32,26 @@ def _publish_article(run_id: int, article: ArticleOutput) -> str:
     return mcp_client.publish_article(article)
 
 
-def _persist_success(run_id: int, topic: str, username: str, result: ArticleOutput, start: datetime):
-    """流程成功后落库文章并更新 run 状态。
-
-    若开启人工审核（默认）：仅落库，review_status=0 待审核，不自动发布；
-    若关闭人工审核：生成完成后直接通过 MCP 自动发布并记录结果。
-    """
-    try:
-        repo.save_article(run_id, result, author=username, topic=topic)
-
-        publish_result = None
-        review_status = 0  # 待审核
-        if not settings.require_human_review:
-            # 无需人工审核：直接发布，审核状态记为 -1（人工审核未开启）
-            publish_result = _publish_article(run_id, result)
-            review_status = -1
-            repo.update_article_review(run_id, review_status=review_status, publish_result=publish_result)
-
-        repo.update_run(
-            run_id,
-            status="SUCCESS",
-            rounds=0,  # 实际轮次以 review_logs 为准，这里保留兼容
-            finished_at=datetime.now(),
-            duration_ms=int((datetime.now() - start).total_seconds() * 1000),
-        )
-    except Exception as e:
-        logger.warning(f"[chat] 成功后续写库/发布失败（已忽略）: {e}")
-
-
 class ReviewRequest(BaseModel):
     action: str  # approve=通过并发布 / reject=放弃 / regenerate=重新生成
+
+
+@router.post("/generate")
+def generate(req: TopicRequest, username: str = Depends(_get_current_user), db: Session = Depends(get_db)):
+    """
+    文章生成（异步）：仅创建任务并返回 run_id，后台进程池执行。
+
+    前端拿到 run_id 后轮询 GET /api/tasks/{run_id} 获取进度与结果。
+    """
+    topic = (req.topic or "").strip()
+    if not topic:
+        raise HTTPException(status_code=400, detail="主题不能为空")
+
+    run_id = repo.create_run(topic, username)  # status=PENDING
+    get_executor().submit(worker_tasks.run_generate_task, run_id, topic, username, None)
+    require_review = settings.require_human_review
+    return {"topic": topic, "author": username, "run_id": run_id,
+            "status": "PENDING", "require_review": require_review}
 
 
 @router.post("/review/{run_id}")
@@ -77,6 +67,14 @@ def review(run_id: int, req: ReviewRequest, username: str = Depends(_get_current
 
     action = (req.action or "").strip().lower()
     if action == "approve":
+        # 仅允许「已成功生成」的任务发布；非 SUCCESS 状态（如进行中/失败/取消）不发布，仅记日志
+        if run.status != "SUCCESS":
+            logger.warning(
+                f"[chat] 审核通过被拒绝：run_id={run_id} 当前状态为 {run.status}，非 SUCCESS，不执行发布"
+            )
+            return {"run_id": run_id, "action": action, "published": False,
+                    "msg": f"任务状态为 {run.status}，尚未成功生成，无法发布"}
+
         # 通过：自动发布，写入发布结果。审核状态：未开启审核记 -1，否则记 1
         target_status = -1 if not settings.require_human_review else 1
         if article.review_status in (1, -1) and article.publish_result:
@@ -101,67 +99,26 @@ def review(run_id: int, req: ReviewRequest, username: str = Depends(_get_current
         return {"run_id": run_id, "action": action, "published": False, "msg": "已放弃，未发布"}
 
     elif action == "regenerate":
-        # 重新生成
-        # prefill = repo.get_latest_draft(run_id)
-        repo.update_run(run_id, status="RUNNING", error=None, finished_at=None, duration_ms=None)
-        start = datetime.now()
-        try:
-            result: ArticleOutput = run_flow(topic=run.topic, user=username, run_id=run_id)
-        except Exception as e:
-            repo.update_run(run_id, status="FAILED", error=str(e)[:2000],
-                            finished_at=datetime.now(),
-                            duration_ms=int((datetime.now() - start).total_seconds() * 1000))
-            logger.exception("[chat] 重新生成失败")
-            raise HTTPException(status_code=500, detail=f"重新生成失败: {e}")
+        # 重新生成：异步提交后台任务（复用同一 run_id，review_logs 按新 round 追加）
+        if run.status == "RUNNING":
+            raise HTTPException(status_code=400, detail="任务进行中，无法重新生成")
 
-        _persist_success(run_id, run.topic, username, result, start)
-
+        # 用户主动点击重新生成：不带上一轮草稿，从「搜索→分析→写作」完整重新生成
+        # （仅自动回环 maybe_revise 才带上一轮草稿，用户手动 regenerate 一律从头开始）
+        # prefill = None
+        # repo.update_run(run_id, status="RUNNING", error=None, finished_at=None, duration_ms=None,
+        #                 current_step="researching#1")
+        get_executor().submit(worker_tasks.run_generate_task, run_id, run.topic, username)
         return {"run_id": run_id, "action": action, "published": False,
-                "msg": "已重新生成，待人工审核", "result": result,
-                "require_review": settings.require_human_review,
-                "review_status": 0 if settings.require_human_review else 1}
+                "msg": "已提交重新生成，请轮询进度", "require_review": settings.require_human_review}
 
     raise HTTPException(status_code=400, detail=f"未知审核动作: {req.action}")
-
-
-@router.post("/generate")
-def generate(req: TopicRequest, username: str = Depends(_get_current_user), db: Session = Depends(get_db)):
-    """
-    文章生成
-    :param req:
-    :param username:
-    :param db:
-    :return:
-    """
-    topic = (req.topic or "").strip()
-    if not topic:
-        raise HTTPException(status_code=400, detail="主题不能为空")
-
-    run_id = repo.create_run(topic, username)
-    start = datetime.now()
-    try:
-        result = run_flow(topic, user=username, run_id=run_id)
-    except Exception as e:
-        repo.update_run(run_id, status="FAILED", error=str(e)[:2000],
-                        finished_at=datetime.now(),
-                        duration_ms=int((datetime.now() - start).total_seconds() * 1000))
-        logger.exception("[chat] 生成失败")
-        raise HTTPException(status_code=500, detail=f"生成失败: {e}")
-
-    _persist_success(run_id, topic, username, result, start)
-    require_review = settings.require_human_review
-    return {"topic": topic, "result": result, "author": username, "run_id": run_id,
-            "require_review": require_review,
-            "review_status": 0 if require_review else 1}
 
 
 @router.post("/generate/retry/{run_id}")
 def retry(run_id: int, username: str = Depends(_get_current_user), db: Session = Depends(get_db)):
     """
-    断点续跑：对某个运行记录重新执行。
-
-    若该 run 已落过草稿（review_logs step='draft'），则跳过搜索/分析，
-    直接基于已有草稿进入写作/审校（从写作继续）。否则从头重跑。
+    断点续跑（异步）：对某个运行记录重新执行。
     """
     run = repo.get_run(run_id)
     if run is None:
@@ -171,22 +128,62 @@ def retry(run_id: int, username: str = Depends(_get_current_user), db: Session =
 
     topic = run.topic
     # 复用已有草稿实现「从写作继续」
-    prefill = repo.get_latest_draft(run_id)
+    # prefill = repo.get_latest_draft(run_id)
 
-    # 重置该 run 的状态与过程（保留历史 review_logs 便于对比，可选清理）
-    repo.update_run(run_id, status="RUNNING", error=None, finished_at=None, duration_ms=None)
-    start = datetime.now()
-    try:
-        result = run_flow(topic, user=username, run_id=run_id, prefill_draft=prefill)
-    except Exception as e:
-        repo.update_run(run_id, status="FAILED", error=str(e)[:2000],
-                        finished_at=datetime.now(),
-                        duration_ms=int((datetime.now() - start).total_seconds() * 1000))
-        logger.exception("[chat] 重试失败")
-        raise HTTPException(status_code=500, detail=f"重试失败: {e}")
-
-    _persist_success(run_id, topic, username, result, start)
+    # repo.update_run(run_id, status="RUNNING", error=None, finished_at=None, duration_ms=None, current_step="researching#1")
+    get_executor().submit(worker_tasks.run_generate_task, run_id, topic, username)
     require_review = settings.require_human_review
-    return {"topic": topic, "result": result, "author": username, "run_id": run_id,
-            "require_review": require_review,
-            "review_status": 0 if require_review else 1}
+    return {"topic": topic, "author": username, "run_id": run_id, "status": "RUNNING", "require_review": require_review}
+
+
+@router.get("/tasks/{run_id}")
+def task_status(run_id: int, db: Session = Depends(get_db)):
+    """轮询任务进度：返回状态、当前步骤、轮次、成品（SUCCESS 时）。"""
+    run = repo.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="运行记录不存在")
+
+    article = None
+    if run.status == "SUCCESS":
+        art = repo.get_article_by_run_id(run_id)
+        if art is not None:
+            article = {
+                "title": art.title,
+                "summary": art.summary,
+                "body": art.body,
+                "keywords": art.keywords,
+                "confidence": art.confidence,
+                "review_status": art.review_status,
+                "publish_result": art.publish_result,
+            }
+
+    return {
+        "run_id": run_id,
+        "status": run.status,
+        "current_step": run.current_step,
+        "rounds": run.rounds,
+        "error": run.error,
+        "article": article,
+        "require_review": settings.require_human_review,
+        "review_status": article["review_status"] if article else None,
+    }
+
+
+@router.post("/tasks/{run_id}/cancel")
+def cancel_task(run_id: int, username: str = Depends(_get_current_user), db: Session = Depends(get_db)):
+    """
+    取消任务：仅允许取消 PENDING/RUNNING 的任务，并记录为 CANCELLED。
+
+    注意：CrewAI 子进程中的模型调用无法被真正强行终止（Python future 对已开始任务
+    的 cancel() 无效），因此该接口为"软取消"——前端停止轮询，后端标记为已取消；
+    子进程跑完后若发现状态已为 CANCELLED，不会再覆盖为 SUCCESS/FAILED。
+    """
+    run = repo.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="运行记录不存在")
+    if run.status not in ("PENDING", "RUNNING"):
+        raise HTTPException(status_code=400, detail=f"当前任务状态为 {run.status}，无法取消")
+
+    repo.update_run(run_id, status="CANCELLED", error=None, finished_at=datetime.now(),
+                    duration_ms=int((datetime.now() - run.created_at).total_seconds() * 1000))
+    return {"run_id": run_id, "status": "CANCELLED"}

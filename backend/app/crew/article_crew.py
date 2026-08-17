@@ -10,6 +10,7 @@
   本地运行日志由 langfuse_client.trace_run 包裹记录。
 """
 import json
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -24,7 +25,7 @@ if _ROOT_ENV.exists():
     load_dotenv(_ROOT_ENV, override=True)
 
 from pydantic import BaseModel, Field
-from crewai import LLM, Agent, Task, Crew, Process
+from crewai import LLM, Agent, Task
 from crewai.flow.flow import Flow, listen, start
 from crewai_tools import TavilySearchTool
 from crewai.tools import tool as crewai_tool
@@ -47,7 +48,7 @@ def _load_yaml(name: str) -> dict:
 
 class ArticleOutput(BaseModel):
     """结构化产出：便于前端展示与下游入库。"""
-    title: str = Field(description="文章标题")
+    title: str = Field(default="", description="文章标题")
     summary: str = Field(default="", description="文章摘要（100字以内）")
     body: str = Field(default="", description="文章正文")
     keywords: list[str] = Field(default_factory=list, description="关键词列表")
@@ -76,25 +77,29 @@ def _retry(max_attempts: int = 3, backoff: float = 2.0):
 
 
 def _extract_article_from_raw(raw: str) -> "ArticleOutput | None":
-    """从 Crew 的完整原始输出中提取 ArticleOutput。
+    """
+    从 Crew 的完整原始输出中提取 ArticleOutput。
 
-    raw 通常是模型输出的 JSON（可能被 ```json 代码块包裹）。这里做最稳健的提取，
-    优先保证 body（长正文）完整：先尝试整段 json.loads，再从文本中截取第一个
-    完整的 { ... } 块解析；若仍失败返回 None，由调用方兜底。
+    raw 通常是模型输出的 JSON（可能被 ```json 代码块包裹）。这里做最稳健的提取：
+    1. 去掉 ```json ... ``` 代码块包裹；
+    2. 尝试整段 json.loads；
+    3. 尝试截取第一个 { ... } 块解析；
+    4. 若 JSON 损坏，用正则分别提取 title/summary/body/keywords/confidence；
+    5. 仍失败返回 None，由调用方兜底。
     """
     if not raw:
         return None
-    text = raw.strip()
-    # 去掉可能的 ```json ... ``` 包裹
-    if text.startswith("```"):
-        # 找到第一个换行后的内容到最后一个 ``` 前
-        first_newline = text.find("\n")
-        last_fence = text.rfind("```")
-        if first_newline != -1 and last_fence > first_newline:
-            text = text[first_newline + 1:last_fence].strip()
 
+    text = raw.strip()
+
+    # 去掉任意位置的 ```json ... ``` 代码块包裹（取第一个代码块内容）
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # 候选 1：去掉 fence 后的全文
+    # 候选 2：第一个 { 到最后一个 } 之间的内容
     candidates = [text]
-    # 尝试截取文本中第一个 { 到最后一个 } 之间的完整 JSON
     try:
         start = text.index("{")
         end = text.rindex("}")
@@ -109,20 +114,73 @@ def _extract_article_from_raw(raw: str) -> "ArticleOutput | None":
             continue
         if not isinstance(data, dict):
             continue
-        # 必须至少有 body 或 title，否则认为不是文章结构
         if not (data.get("body") or data.get("title")):
             continue
-        keywords = data.get("keywords") or []
-        if isinstance(keywords, str):
-            keywords = [keywords]
-        return ArticleOutput(
-            title=data.get("title") or "",
-            summary=data.get("summary") or "",
-            body=data.get("body") or "",
-            keywords=keywords,
-            confidence=float(data.get("confidence") or 0.0),
+        return _dict_to_article(data)
+
+    # JSON 损坏时的兜底：用正则尽量提取关键字段，保证 title/confidence 不丢
+    return _extract_article_by_regex(text)
+
+
+def _dict_to_article(data: dict) -> ArticleOutput:
+    """把 dict 转换为 ArticleOutput，字段容错处理。"""
+    keywords = data.get("keywords") or []
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    return ArticleOutput(
+        title=(data.get("title") or "").strip(),
+        summary=(data.get("summary") or "").strip(),
+        body=(data.get("body") or "").strip(),
+        keywords=keywords,
+        confidence=float(data.get("confidence") or 0.0),
+    )
+
+
+def _extract_article_by_regex(text: str) -> "ArticleOutput | None":
+    """当 JSON 解析失败时，用正则从文本中提取字段。
+
+    用下一个 key 作为锚点，避免 body 内容中的引号提前截断匹配。
+    """
+    title_match = re.search(r'"title"\s*:\s*"(.*?)"\s*,\s*"summary"', text, re.DOTALL)
+    summary_match = re.search(r'"summary"\s*:\s*"(.*?)"\s*,\s*"body"', text, re.DOTALL)
+    confidence_match = re.search(r'"confidence"\s*:\s*([\d.]+)', text)
+
+    # body 从 "body" 之后开始，贪婪匹配到 ", "keywords" 之前
+    body_match = re.search(r'"body"\s*:\s*"(.*)"\s*,\s*"keywords"', text, re.DOTALL)
+
+    # 如果关键字段都没匹配到，说明不是文章结构
+    if not (title_match or body_match):
+        return None
+
+    def _unescape(s: str) -> str:
+        if not s:
+            return ""
+        # 简单处理常见的 JSON 转义
+        return (
+            s.replace('\\n', '\n')
+             .replace('\\"', '"')
+             .replace('\\\\', '\\')
+             .replace('\\t', '\t')
         )
-    return None
+
+    title = _unescape(title_match.group(1)) if title_match else ""
+    summary = _unescape(summary_match.group(1)) if summary_match else ""
+    body = _unescape(body_match.group(1)) if body_match else ""
+    confidence = float(confidence_match.group(1)) if confidence_match else 0.0
+
+    keywords = []
+    kw_match = re.search(r'"keywords"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+    if kw_match:
+        kw_str = kw_match.group(1)
+        keywords = re.findall(r'"(.*?)"', kw_str)
+
+    return ArticleOutput(
+        title=title.strip(),
+        summary=summary.strip(),
+        body=body.strip(),
+        keywords=keywords,
+        confidence=confidence,
+    )
 
 
 class TechMediaCrew:
@@ -134,6 +192,9 @@ class TechMediaCrew:
         self._setup_tools()
         self._load_config()
         self._build_agents()
+        # 进度回写所需上下文（由 Flow / generate 在每次调用前设置）
+        self.run_id: int = None
+        self.round_no: int = 1  # 当前重写轮次（1 表示首轮）
 
     def _setup_llm(self):
         self.llm = LLM(
@@ -216,23 +277,24 @@ class TechMediaCrew:
                 t["writing_task"]["description"].format(topic=topic)
                 + f"\n\n【已有草稿，请在此基础上完善/改写，保持结构与字段完整】\n{prefill_draft}"
             )
+
             if revision_feedback:
                 writing_desc += (
                     f"\n\n【主编修改意见，必须逐条响应并修订】\n{revision_feedback}"
                 )
+
             writing_task = Task(
                 description=writing_desc,
                 agent=self.writer,
                 expected_output=t["writing_task"]["expected_output"],
                 output_pydantic=ArticleOutput,
             )
-            crew = Crew(
-                agents=[self.writer],
-                tasks=[writing_task],
-                verbose=True,
-                process=Process.sequential,
-                tracing=True,
-            )
+
+            # 预填草稿场景：直接从撰写开始（基于已有草稿改写）
+            tasks = [writing_task]
+
+            step_keys = ["writing"]
+
         else:
             research_task = Task(
                 description=t["research_task"]["description"].format(topic=topic),
@@ -244,7 +306,6 @@ class TechMediaCrew:
                 description=t["analysis_task"]["description"].format(topic=topic),
                 agent=self.analyst,
                 expected_output=t["analysis_task"]["expected_output"],
-                context=[research_task],
             )
 
             # 重写轮次：把「主编修改意见」作为定向反馈注入写作任务，使作者按意见改稿
@@ -253,47 +314,49 @@ class TechMediaCrew:
                 writing_desc += (
                     f"\n\n【主编修改意见，必须逐条响应并修订】\n{revision_feedback}"
                 )
+
             writing_task = Task(
                 description=writing_desc,
                 agent=self.writer,
                 expected_output=t["writing_task"]["expected_output"],
                 output_pydantic=ArticleOutput,
-                context=[research_task, analysis_task],
             )
 
-            # Process.sequential（顺序执行）
-            # 所有 Task 按列表顺序一个接一个串行执行。
-            # 每个 Task 的 context（依赖）通常指向前面已完成的 Task 输出
-            # 每个 Task 由指定的 agent 执行，没有中间管理层
-            # 简单、可预测、易调试，适合线性流水线，流程是"扁平"的：没有谁在协调谁
-            #
-            # Process.hierarchical（层级执行）
-            # CrewAI 会自动创建一个"经理"(manager) Agent，由它来统筹调度
-            # manager 自己不写内容，而是根据目标和 Task 列表，动态决定把哪个子任务派给哪个 agent、按什么顺序、是否需要迭代。
-            # agent 之间可以并行、互相协作，manager 负责汇总与质量把关。
-            # 适合复杂、任务间依赖不明确、需要灵活协调的多智能体场景。
-            # 代价：行为不那么确定（每次调度可能不同）、更耗 token、需要 model 支持且通常要配 manager_llm、调试更复杂。
-            crew = Crew(
-                agents=[self.researcher, self.analyst, self.writer, self.editor],
-                tasks=[research_task, analysis_task, writing_task],
-                verbose=True,
-                process=Process.sequential,
-                tracing=True,  # CrewAI 原生 tracing：上报至 CrewAI AMP（依赖 CREWAI_API_KEY）
-            )
+            tasks = [research_task, analysis_task, writing_task]
 
+            step_keys = ["researching", "analyzing", "writing"]
+
+        # 手动按序执行每个 Task，并在【开始前】回写当前步骤，保证前端实时展示。
+        # 不使用 crew.kickoff()，因为 CrewAI 的回调机制无法可靠区分当前执行到哪个 Agent。
+        # 注意：task.execute_sync(context=...) 的 context 必须是【字符串】，不能传 TaskOutput 列表
+        # （CrewAI 的 TaskStartedEvent.context 为 str 类型，传列表会校验失败）。
         logger.info(f"[_run_crew] 开始编排 topic={topic} revision={'有' if revision_feedback else '无'} prefill={'有' if prefill_draft else '无'}")
-        result = crew.kickoff()
+        last_output = None
+        ctx_text = ""
+        for step_key, task in zip(step_keys, tasks):
+            try:
+                from app.db import repository as repo
+                repo.update_run_current_step(self.run_id, f"{step_key}#{self.round_no}")
+            except Exception as e:
+                logger.warning(f"[_run_crew] 步骤回写失败（已忽略）: {e}")
 
-        # 将 Crew 输出稳健解析为结构化 ArticleOutput。
-        # 注意：writing_task 输出的是含长正文（body）的大 JSON。CrewAI 的 output_pydantic
-        # 在解析超长字符串字段时可能截断/丢失内容，因此【优先使用 result.raw 完整原文】
+            # 仅把前面已完成的 Task 输出拼接为字符串，作为本 Task 的上下文
+            last_output = task.execute_sync(context=ctx_text or None)
+            logger.info(f"{step_key} last step output:{last_output}")
+            ctx_text += ("\n\n" if ctx_text else "") + (getattr(last_output, "raw", None) or str(last_output))
+
+        result = last_output  # 最后一个 Task（撰写）的输出即成品
+
+        # 将 Task 输出稳健解析为结构化 ArticleOutput。
+        # 注意：writing_task 输出的是含长正文（body）的大 JSON。
+        # CrewAI 的 output_pydantic在解析超长字符串字段时可能截断/丢失内容，因此【优先使用 result.raw 完整原文】
         # 自己提取 body，确保主编审校时拿到的是完整正文。
         article: ArticleOutput
         if isinstance(result, ArticleOutput):
             article = result
         else:
             # 1) 优先从完整原始输出 raw 提取（最保真，不会被 pydantic 截断）
-            raw_text = getattr(result, "raw", None) if not isinstance(result, (dict, str)) else None
+            raw_text = getattr(result, "raw", None)
             if raw_text:
                 parsed = _extract_article_from_raw(raw_text)
                 if parsed is not None:
@@ -301,30 +364,18 @@ class TechMediaCrew:
                 else:
                     # raw 无法解析为结构，直接把 raw 当作正文兜底
                     article = ArticleOutput(body=raw_text)
-            elif isinstance(result, dict):
-                article = ArticleOutput(**result)
             elif hasattr(result, "pydantic") and result.pydantic is not None:
-                # CrewOutput：当 task 配置了 output_pydantic 时，结构化结果在此
+                # TaskOutput 配置了 output_pydantic 时，结构化结果在此
                 try:
                     article = result.pydantic if isinstance(result.pydantic, ArticleOutput) else ArticleOutput(**result.pydantic)
-                except Exception:
-                    article = ArticleOutput(body=str(result))
-            elif hasattr(result, "to_dict"):  # CrewOutput 等
-                d = result.to_dict()
-                flat = d.get("tasks_output")
-                if isinstance(flat, list) and flat:
-                    last = flat[-1]
-                    if isinstance(last, dict):
-                        d = last.get("pydantic") or last.get("output") or last
-                try:
-                    article = ArticleOutput(**d) if isinstance(d, dict) else ArticleOutput(body=str(d))
                 except Exception:
                     article = ArticleOutput(body=str(result))
             else:
                 article = ArticleOutput(body=str(result))
 
-        logger.info(f"[_run_crew] 编排完成，标题={article.title!r} 置信度={article.confidence}")
+        logger.info(f"[_run_crew] 第{self.round_no}轮编排完成，标题={article.title} 置信度={article.confidence}")
         return article
+
 
     def generate(
         self,
@@ -333,6 +384,7 @@ class TechMediaCrew:
         revision_feedback: str = None,
         prefill_draft: str = None,
         run_id: int = None,
+        round_no: int = 1,
     ) -> ArticleOutput:
         """
         对外主入口：包裹可观测性与重试。
@@ -341,8 +393,13 @@ class TechMediaCrew:
         :param revision_feedback: 不为空时，作为主编修改意见注入写作任务（定向重写）。
         :param prefill_draft: 搜索/分析/首轮草稿的过程落库（断点续跑场景下 prefill 阶段不写这些）
         :param run_id: 非空时，将每步产物写入 review_logs 实现过程持久化。
+        :param round_no: 当前重写轮次（0 表示首轮），用于进度回调的 #轮次 后缀。
         :return:
         """
+        # 进度回写上下文（供 _run_crew 手动编排时按步骤回写使用）
+        self.run_id = run_id
+        self.round_no = round_no
+
         # 搜索/分析/首轮草稿的过程落库（断点续跑场景下 prefill 阶段不写这些）
         # if run_id and not prefill_draft:
         #     from app.db import repository as repo
@@ -376,11 +433,13 @@ class EditorialFlow(Flow):
         user = self.state.get("user")
         run_id = self.state.get("run_id")
         prefill = self.state.get("prefill_draft")
+        round_no = self.state.get('rounds', 1)
 
         # 首轮：若有预填草稿则跳过搜索/分析（断点续跑）
         logger.info(f"[editorial_flow] 首轮起草开始,{topic=}")
+
         self.state["draft"] = self.crew.generate(topic, user,
-            prefill_draft=prefill, run_id=run_id,
+            prefill_draft=prefill, run_id=run_id, round_no=round_no,
         )
 
         # 落库首轮草稿
@@ -389,9 +448,9 @@ class EditorialFlow(Flow):
             try:
                 draft = self.state["draft"]
                 body = draft.body if isinstance(draft, ArticleOutput) else str(draft)
-                repo.add_review_log(run_id, step="draft", content=body, round=0)
+                repo.add_review_log(run_id, step="draft", content=body, round=round_no)
             except Exception as e:
-                logger.exception(f"[draft] 草稿日志写入失败（已忽略）")
+                logger.exception(f"[draft] 草稿日志写入失败")
 
         logger.info("[editorial_flow] 首轮起草完成")
 
@@ -402,12 +461,19 @@ class EditorialFlow(Flow):
         返回主编意见（verdict 文本）。供首轮 review 节点与回环内的重写后审校共用，
         确保每一轮（含最后一轮即使不通过）的审校结论都被持久化。
         """
+        run_id = self.state.get("run_id")
+        if run_id:
+            from app.db import repository as repo
+            repo.update_run_current_step(run_id, f"editing#{round_idx}")
+
         draft = self.state.get("draft")
         # 容错：draft 可能为 ArticleOutput 或历史遗留的字符串
         if isinstance(draft, ArticleOutput):
             text = draft.body or ""
         else:
             text = draft or ""
+
+        # 基础校验
         hard_fail = len(text) < 100 or "待补充" in text
 
         # 审校task配置
@@ -434,8 +500,9 @@ class EditorialFlow(Flow):
             from app.db import repository as repo
             try:
                 repo.add_review_log(
-                    run_id, step="review", content=verdict,
-                    round=round_idx,
+                    run_id, step="review",
+                    content=verdict,
+                    round=round_idx,  # 轮数
                     verdict="REVISE" if self.state["needs_revision"] else "PASS",
                     needs_revision=self.state["needs_revision"],
                 )
@@ -448,7 +515,7 @@ class EditorialFlow(Flow):
     @listen(draft)
     def review(self):
         # 首轮审校（round 0）
-        self._run_review(round_idx=self.state.get("rounds", 0))
+        self._run_review(round_idx=self.state.get("rounds", 1))
 
 
     @listen(review)
@@ -456,14 +523,24 @@ class EditorialFlow(Flow):
         run_id = self.state.get("run_id")
         # 重写+再审校 的回环：每轮重写后都重新走真实审校并落库，
         # 直到通过或达到最大循环次数（最后一轮即使不通过也会保存审校意见）。
-        while self.state.get("needs_revision") and self.state.get("rounds", 0) < settings.max_revision_rounds:
-            self.state["rounds"] = self.state.get("rounds", 0) + 1
+        while self.state.get("needs_revision") and self.state.get("rounds") < settings.max_revision_rounds:
+            # 当前轮数
+            current_rounds = self.state.get("rounds", 1)
             feedback = self.state.get("feedback", "")
-            logger.info(f"[editorial_flow] 第 {self.state['rounds']} 轮重写，主编意见: {feedback[:200]}")
+            logger.info(f"[editorial_flow] 第 {current_rounds} 轮，主编意见: {feedback[:200]}")
 
+            # 断点续跑：基于上一轮草稿（含主编意见）直接改写，避免重新从搜索开始，
+            # 否则审校就失去了意义（审校是针对草稿提意见，重写应在草稿基础上修改）。
+            prev_draft = self.state.get("draft")
+            prefill = prev_draft.body if isinstance(prev_draft, ArticleOutput) else (prev_draft or None)
+
+            self.state["rounds"] = current_rounds + 1
+
+            # 下一轮生成，从上一轮草稿的基础上修改
             self.state["draft"] = self.crew.generate(
                 self.state["topic"], self.state.get("user"),
                 revision_feedback=feedback, run_id=run_id,
+                prefill_draft=prefill, round_no=self.state["rounds"],
             )
 
             # 落库本轮重写后的草稿
@@ -501,7 +578,7 @@ def run_flow(
         flow = EditorialFlow(crew)
         flow.state["topic"] = topic
         flow.state["user"] = user
-        flow.state["rounds"] = 0  # 从 0 开始计数，使审校回环真正生效
+        flow.state["rounds"] = 1  # 第一轮
         flow.state["run_id"] = run_id
         flow.state["prefill_draft"] = prefill_draft # 先不用已有草稿
         return flow.kickoff()
