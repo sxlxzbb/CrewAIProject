@@ -1,8 +1,11 @@
 # ============ backend + MySQL 编排（部署到 WSL2 原生 docker-ce）============
-# 使用方式（在项目根目录执行）：
-#   docker compose up -d --build
-# 查看日志：
-#   docker compose logs -f backend
+# 使用方式（先手动打镜像，再 compose 启动）：
+#   1. 构建 backend 镜像（在 backend/ 目录下执行）：
+#        docker build -f Dockerfile -t crewai-backend:v1.0.0 .
+#   2. 在项目根目录执行（compose 直接引用已构建的镜像，不再 build）：
+#        docker compose up -d
+#   3. 查看日志：
+#        docker compose logs -f backend
 #
 # 注意：
 # 1. MySQL 数据持久化到命名卷 mysql_data，重启不丢失。
@@ -36,9 +39,7 @@ services:
       start_period: 30s
 
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: crewai-backend:v1.0.0      # 先手动 docker build 出此镜像，再 compose up
     container_name: crewai-backend
     restart: unless-stopped
     depends_on:
