@@ -6,18 +6,33 @@
 
 Windows 下多进程需保证 worker 函数在独立模块中可被 pickle，故 _worker 放在 tasks.py。
 """
+import os
+
 import multiprocessing as mp
 import signal
 from concurrent.futures import ProcessPoolExecutor
 
-# demo 阶段进程数设小；CrewAI 主要吃模型 IO，过大无意义
-MAX_WORKERS = 2
+from app.config.settings import settings
+
+# 进程数配置依据（取 env 中的 WORKER_PROCESSES）：
+# - 未配置(=0)或非法时，回退到 "min(CPU核数, 4)"：CrewAI 每个任务都吃模型 IO 且常驻
+#   较久，太多进程会同时打 LLM 限流 / 占满 MySQL 连接 / 吃光内存，并非越多越快。
+# - 配置值上限收敛到 8，避免误配一个很大的数把机器拖垮。
+def _resolve_max_workers() -> int:
+    raw = settings.worker_processes
+    if raw and raw > 0:
+        return min(raw, 8)
+    return min(os.cpu_count() or 1, 4)
+
+
+MAX_WORKERS = _resolve_max_workers()
 
 _executor: ProcessPoolExecutor | None = None
 
 
 def _ignore_sigint():
-    """子进程初始化时忽略 SIGINT。
+    """
+    子进程初始化时忽略 SIGINT。
 
     crewai.telemetry 在 import 时会给 SIGINT 注册自定义 handler，导致主进程 Ctrl+C 时
     子进程也被唤醒并打印一段无意义的 KeyboardInterrupt traceback。这里在子进程里把

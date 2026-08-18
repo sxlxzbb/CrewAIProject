@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     # False -> 生成完成后直接通过 MCP 自动发布
     require_human_review: bool = True
 
+    # 后台任务进程池大小（CrewAI 文章生成的并发进程数）
+    # 0 或负数表示使用默认值；实际生效值见 worker/pool.py 的解析逻辑
+    worker_processes: int = 4
+
     @property
     def database_url(self) -> str:
         return (
