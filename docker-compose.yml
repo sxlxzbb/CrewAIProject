@@ -1,0 +1,97 @@
+# ============ backend + MySQL 编排（部署到 WSL2 原生 docker-ce）============
+# 使用方式（在项目根目录执行）：
+#   docker compose up -d --build
+# 查看日志：
+#   docker compose logs -f backend
+#
+# 注意：
+# 1. MySQL 数据持久化到命名卷 mysql_data，重启不丢失。
+# 2. backend 通过 service 名 "mysql" 连接数据库（DB_HOST=mysql），
+#    不要用 localhost（容器内 localhost 是容器自己）。
+# 3. 敏感配置一律通过环境变量注入，不要把 .env 打进镜像。
+
+services:
+  mysql:
+    image: mysql/mysql-server:8.0
+    container_name: crewai-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-123456}
+      MYSQL_DATABASE: ${DB_NAME:-crew_ai}
+      MYSQL_ROOT_HOST: "%"            # 允许任意主机用 root 连接（开发期；生产建议收紧）
+      TZ: Asia/Shanghai
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"                    # 便于宿主机（Windows/WSL）直接用客户端连
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-123456}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: crewai-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      # ---- 模型 ----
+      MODEL_NAME: ${MODEL_NAME}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL}
+      TEMPERATURE: ${TEMPERATURE:-0.7}
+      MAX_ITER: ${MAX_ITER:-3}
+      MAX_REVISION_ROUNDS: ${MAX_REVISION_ROUNDS:-3}
+      EDITOR_MODEL_NAME: ${EDITOR_MODEL_NAME}
+      EDITOR_DASHSCOPE_API_KEY: ${EDITOR_DASHSCOPE_API_KEY}
+      EDITOR_DASHSCOPE_BASE_URL: ${EDITOR_DASHSCOPE_BASE_URL}
+      EDITOR_TEMPERATURE: ${EDITOR_TEMPERATURE:-0.7}
+      # ---- 搜索 ----
+      TAVILY_API_KEY: ${TAVILY_API_KEY}
+      # ---- 数据库（指向 compose 里的 mysql 服务）----
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD:-123456}
+      DB_NAME: ${DB_NAME:-crew_ai}
+      # ---- 可观测性 ----
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_HOST: ${LANGFUSE_HOST}
+      CREWAI_TRACING_ENABLED: ${CREWAI_TRACING_ENABLED:-true}
+      CREWAI_API_KEY: ${CREWAI_API_KEY}
+      # ---- 安全 ----
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-1440}
+      # ---- MCP（注意：MCP_BASE_URL 若指向 Windows 本机的 Java 服务，
+      #      容器内 localhost 不可达，需改成宿主机可达地址，如 host.docker.internal）----
+      MCP_BASE_URL: ${MCP_BASE_URL}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN}
+      # ---- 发布审核 ----
+      REQUIRE_HUMAN_REVIEW: ${REQUIRE_HUMAN_REVIEW:-True}
+      # ---- 默认账号（init_db 启动时插入）----
+      DEFAULT_USERNAME: ${DEFAULT_USERNAME:-admin}
+      DEFAULT_PASSWORD: ${DEFAULT_PASSWORD:-123456}
+      # ---- 后台任务进程池大小 ----
+      WORKER_PROCESSES: ${WORKER_PROCESSES:-2}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  mysql_data:
