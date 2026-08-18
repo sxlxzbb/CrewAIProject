@@ -242,6 +242,7 @@ class TechMediaCrew:
             role=a["analyst"]["role"],
             goal=a["analyst"]["goal"],
             backstory=a["analyst"]["backstory"],
+            tools=[self.current_time_tool],
             **common,
         )
 
