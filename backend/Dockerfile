@@ -22,8 +22,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # 先只拷贝依赖清单，利用缓存
+# 使用阿里云 pip 镜像源，加速国内构建
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+        -i https://mirrors.aliyun.com/pypi/simple/
 
 # ---- 阶段 2：运行镜像（只带代码 + 依赖，瘦身）----
 FROM python:3.11-slim
