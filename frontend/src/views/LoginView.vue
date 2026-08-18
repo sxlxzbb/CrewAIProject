@@ -11,7 +11,6 @@
         </button>
       </form>
       <p v-if="error" class="error">{{ error }}</p>
-      <p class="hint">默认账号：admin / 123456</p>
     </div>
   </div>
 </template>
